@@ -1,6 +1,10 @@
 # Playwright Stealth Pool
 
-一个提供Playwright连接池管理和反检测功能的Java库。该项目旨在简化Playwright的使用，提供高效的资源管理，并集成反自动化检测功能。
+[![Maven Central](https://img.shields.io/maven-central/v/cn.xuanyuanli/jujube-parent.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:cn.xuanyuanli%20AND%20a:playwright-stealth-pool)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Java Version](https://img.shields.io/badge/Java-21+-green.svg)](https://www.oracle.com/java/)
+
+> 一个提供Playwright连接池管理和反检测功能的Java库。该项目旨在简化Playwright的使用，提供高效的资源管理，并集成反自动化检测功能。
 
 ## 🚀 核心特性
 
@@ -45,6 +49,15 @@ cn.xuanyuanli.playwright.stealth/
 | 推荐用途 | 批量处理、脚本任务 | Web服务、长时间运行 |
 
 ## 📖 使用指南
+
+### 安装依赖（Maven）
+```xml
+<dependency>
+  <groupId>cn.xuanyuanli</groupId>
+  <artifactId>playwright-stealth-pool</artifactId>
+  <version>LATEST</version>
+</dependency>
+```
 
 ### 基本用法
 
