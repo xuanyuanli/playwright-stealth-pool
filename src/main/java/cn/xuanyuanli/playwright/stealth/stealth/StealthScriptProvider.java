@@ -31,8 +31,12 @@ public class StealthScriptProvider {
         return """
                 // ==================== Navigator WebDriver 修复 ====================
                 // 移除自动化标识，防止通过navigator.webdriver检测
+                // 方法1: 删除prototype上的属性(推荐)
+                delete Object.getPrototypeOf(navigator).webdriver;
+                
+                // 方法2: 如果上面不行,使用defineProperty
                 Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
+                    get: () => false,
                     configurable: true
                 });
                 
@@ -45,71 +49,87 @@ public class StealthScriptProvider {
                 
                 // ==================== Navigator Plugins 模拟 ====================
                 // 模拟常见的浏览器插件，避免空插件列表被检测
-                const mockPlugins = [
-                    {
-                        name: 'Chrome PDF Viewer',
-                        filename: 'internal-pdf-viewer',
-                        description: 'Portable Document Format',
-                        length: 1
-                    },
-                    {
-                        name: 'Native Client',
-                        filename: 'internal-nacl-plugin',
-                        description: 'Native Client',
-                        length: 2
-                    },
-                    {
-                        name: 'Chromium PDF Viewer',
-                        filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                        description: 'Portable Document Format',
-                        length: 1
-                    }
-                ];
+                // 注意: 必须使用PluginArray原型确保typeof检测通过
+                const createPluginArray = () => {
+                    const plugins = [
+                        {
+                            name: 'Chrome PDF Plugin',
+                            filename: 'internal-pdf-viewer',
+                            description: 'Portable Document Format',
+                            length: 1,
+                            0: { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        },
+                        {
+                            name: 'Chrome PDF Viewer',
+                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                            description: 'Portable Document Format',
+                            length: 1,
+                            0: { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        },
+                        {
+                            name: 'Native Client',
+                            filename: 'internal-nacl-plugin',
+                            description: '',
+                            length: 2,
+                            0: { type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable' },
+                            1: { type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable' }
+                        }
+                    ];
                 
-                const mockMimeTypes = [
-                    {
-                        type: 'application/pdf',
-                        suffixes: 'pdf',
-                        description: 'Portable Document Format',
-                        enabledPlugin: mockPlugins[0]
-                    },
-                    {
-                        type: 'application/x-nacl',
-                        suffixes: '',
-                        description: 'Native Client Executable',
-                        enabledPlugin: mockPlugins[1]
-                    },
-                    {
-                        type: 'application/x-pnacl',
-                        suffixes: '',
-                        description: 'Portable Native Client Executable',
-                        enabledPlugin: mockPlugins[1]
-                    }
-                ];
+                    Object.setPrototypeOf(plugins, PluginArray.prototype);
+                    plugins.item = function(index) { return this[index] || null; };
+                    plugins.namedItem = function(name) {
+                        return Array.from(this).find(p => p.name === name) || null;
+                    };
+                    plugins.refresh = function() {};
+                
+                    return plugins;
+                };
                 
                 Object.defineProperty(navigator, 'plugins', {
-                    get: () => {
-                        const plugins = [...mockPlugins];
-                        plugins.length = mockPlugins.length;
-                        plugins.item = function(index) { return this[index] || null; };
-                        plugins.namedItem = function(name) {
-                            return this.find(plugin => plugin.name === name) || null;
-                        };
-                        return plugins;
-                    },
+                    get: createPluginArray,
                     configurable: true
                 });
                 
+                const createMimeTypesArray = () => {
+                    const mimeTypes = [
+                        {
+                            type: 'application/pdf',
+                            suffixes: 'pdf',
+                            description: 'Portable Document Format',
+                            enabledPlugin: navigator.plugins[0]
+                        },
+                        {
+                            type: 'text/pdf',
+                            suffixes: 'pdf',
+                            description: 'Portable Document Format',
+                            enabledPlugin: navigator.plugins[0]
+                        },
+                        {
+                            type: 'application/x-nacl',
+                            suffixes: '',
+                            description: 'Native Client Executable',
+                            enabledPlugin: navigator.plugins[2]
+                        },
+                        {
+                            type: 'application/x-pnacl',
+                            suffixes: '',
+                            description: 'Portable Native Client Executable',
+                            enabledPlugin: navigator.plugins[2]
+                        }
+                    ];
+                
+                    Object.setPrototypeOf(mimeTypes, MimeTypeArray.prototype);
+                    mimeTypes.item = function(index) { return this[index] || null; };
+                    mimeTypes.namedItem = function(name) {
+                        return Array.from(this).find(m => m.type === name) || null;
+                    };
+                
+                    return mimeTypes;
+                };
+                
                 Object.defineProperty(navigator, 'mimeTypes', {
-                    get: () => {
-                        const mimeTypes = [...mockMimeTypes];
-                        mimeTypes.length = mockMimeTypes.length;
-                        mimeTypes.item = function(index) { return this[index] || null; };
-                        mimeTypes.namedItem = function(name) {
-                            return this.find(mimeType => mimeType.type === name) || null;
-                        };
-                        return mimeTypes;
-                    },
+                    get: createMimeTypesArray,
                     configurable: true
                 });
                 
@@ -206,20 +226,15 @@ public class StealthScriptProvider {
                 }
                 
                 // ==================== Permissions API 修复 ====================
-                // 修复权限API查询结果
-                if (navigator.permissions && navigator.permissions.query) {
-                    const originalQuery = navigator.permissions.query;
-                    navigator.permissions.query = function(parameters) {
-                        return originalQuery(parameters).then(result => {
-                            // 对于通知权限，返回granted状态
-                            if (parameters.name === 'notifications') {
-                                Object.defineProperty(result, 'state', {
-                                    get: () => 'granted'
-                                });
-                            }
-                            return result;
-                        });
-                    };
+                // 修复权限API查询结果,使其返回正确的Permissions对象
+                const originalQuery = navigator.permissions?.query?.bind(navigator.permissions);
+                if (originalQuery) {
+                    navigator.permissions.query = (parameters) => (
+                        originalQuery(parameters).catch(() => ({
+                            state: 'prompt',
+                            onchange: null
+                        }))
+                    );
                 }
                 
                 // ==================== Chrome Runtime 修复 ====================
@@ -258,8 +273,9 @@ public class StealthScriptProvider {
     public static String getLightStealthScript() {
         return """
                 // 移除自动化标识
+                delete Object.getPrototypeOf(navigator).webdriver;
                 Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
+                    get: () => false,
                     configurable: true
                 });
                 
