@@ -31,14 +31,21 @@ public class StealthScriptProvider {
         return """
                 // ==================== Navigator WebDriver 修复 ====================
                 // 移除自动化标识，防止通过navigator.webdriver检测
-                // 方法1: 删除prototype上的属性(推荐)
-                delete Object.getPrototypeOf(navigator).webdriver;
-                
-                // 方法2: 如果上面不行,使用defineProperty
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                    configurable: true
-                });
+                // 关键: 必须从Navigator.prototype上删除webdriver属性描述符
+                // 这样 Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver') 才会返回 undefined
+                const navigatorProto = Navigator.prototype;
+                if (Object.getOwnPropertyDescriptor(navigatorProto, 'webdriver')) {
+                    Object.defineProperty(navigatorProto, 'webdriver', {
+                        get: () => undefined,
+                        configurable: true
+                    });
+                    // 删除属性描述符，使其完全不存在
+                    delete navigatorProto.webdriver;
+                }
+                // 同时处理navigator实例上的属性
+                if (Object.getOwnPropertyDescriptor(navigator, 'webdriver')) {
+                    delete navigator.webdriver;
+                }
                 
                 // ==================== Navigator Languages 模拟 ====================
                 // 模拟真实的语言偏好
@@ -49,87 +56,131 @@ public class StealthScriptProvider {
                 
                 // ==================== Navigator Plugins 模拟 ====================
                 // 模拟常见的浏览器插件，避免空插件列表被检测
-                // 注意: 必须使用PluginArray原型确保typeof检测通过
-                const createPluginArray = () => {
-                    const plugins = [
-                        {
-                            name: 'Chrome PDF Plugin',
-                            filename: 'internal-pdf-viewer',
-                            description: 'Portable Document Format',
-                            length: 1,
-                            0: { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
-                        },
-                        {
-                            name: 'Chrome PDF Viewer',
-                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-                            description: 'Portable Document Format',
-                            length: 1,
-                            0: { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
-                        },
-                        {
-                            name: 'Native Client',
-                            filename: 'internal-nacl-plugin',
-                            description: '',
-                            length: 2,
-                            0: { type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable' },
-                            1: { type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable' }
-                        }
-                    ];
-                
-                    Object.setPrototypeOf(plugins, PluginArray.prototype);
-                    plugins.item = function(index) { return this[index] || null; };
-                    plugins.namedItem = function(name) {
-                        return Array.from(this).find(p => p.name === name) || null;
-                    };
-                    plugins.refresh = function() {};
-                
-                    return plugins;
+                // 关键: 必须正确模拟 Plugin, MimeType, PluginArray, MimeTypeArray 的原型链
+                // 使检测 navigator.plugins instanceof PluginArray 返回 true
+
+                // 创建 MimeType 对象的辅助函数
+                const makeMimeType = (data, enabledPlugin) => {
+                    const mimeType = Object.create(MimeType.prototype);
+                    Object.defineProperties(mimeType, {
+                        type: { value: data.type, enumerable: true },
+                        suffixes: { value: data.suffixes, enumerable: true },
+                        description: { value: data.description, enumerable: true },
+                        enabledPlugin: { value: enabledPlugin, enumerable: true }
+                    });
+                    return mimeType;
                 };
-                
+
+                // 创建 Plugin 对象的辅助函数
+                const makePlugin = (data) => {
+                    const plugin = Object.create(Plugin.prototype);
+                    Object.defineProperties(plugin, {
+                        name: { value: data.name, enumerable: true },
+                        filename: { value: data.filename, enumerable: true },
+                        description: { value: data.description, enumerable: true },
+                        length: { value: data.mimeTypes.length, enumerable: true }
+                    });
+                    // 添加 MimeType 索引
+                    data.mimeTypes.forEach((mt, i) => {
+                        const mimeType = makeMimeType(mt, plugin);
+                        Object.defineProperty(plugin, i, { value: mimeType, enumerable: false });
+                        Object.defineProperty(plugin, mt.type, { value: mimeType, enumerable: false });
+                    });
+                    // 添加 item 和 namedItem 方法
+                    plugin.item = function(index) { return this[index] || null; };
+                    plugin.namedItem = function(name) { return this[name] || null; };
+                    return plugin;
+                };
+
+                // 插件数据定义
+                const pluginsData = [
+                    {
+                        name: 'PDF Viewer',
+                        filename: 'internal-pdf-viewer',
+                        description: 'Portable Document Format',
+                        mimeTypes: [
+                            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                            { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        ]
+                    },
+                    {
+                        name: 'Chrome PDF Viewer',
+                        filename: 'internal-pdf-viewer',
+                        description: 'Portable Document Format',
+                        mimeTypes: [
+                            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                            { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        ]
+                    },
+                    {
+                        name: 'Chromium PDF Viewer',
+                        filename: 'internal-pdf-viewer',
+                        description: 'Portable Document Format',
+                        mimeTypes: [
+                            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                            { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        ]
+                    },
+                    {
+                        name: 'Microsoft Edge PDF Viewer',
+                        filename: 'internal-pdf-viewer',
+                        description: 'Portable Document Format',
+                        mimeTypes: [
+                            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                            { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        ]
+                    },
+                    {
+                        name: 'WebKit built-in PDF',
+                        filename: 'internal-pdf-viewer',
+                        description: 'Portable Document Format',
+                        mimeTypes: [
+                            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                            { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' }
+                        ]
+                    }
+                ];
+
+                // 创建 PluginArray
+                const pluginArray = Object.create(PluginArray.prototype);
+                const plugins = pluginsData.map(makePlugin);
+                plugins.forEach((plugin, i) => {
+                    Object.defineProperty(pluginArray, i, { value: plugin, enumerable: true });
+                    Object.defineProperty(pluginArray, plugin.name, { value: plugin, enumerable: false });
+                });
+                Object.defineProperty(pluginArray, 'length', { value: plugins.length, enumerable: true });
+                pluginArray.item = function(index) { return this[index] || null; };
+                pluginArray.namedItem = function(name) { return this[name] || null; };
+                pluginArray.refresh = function() {};
+
+                // 创建 MimeTypeArray
+                const mimeTypeArray = Object.create(MimeTypeArray.prototype);
+                const allMimeTypes = [];
+                plugins.forEach(plugin => {
+                    for (let i = 0; i < plugin.length; i++) {
+                        const mt = plugin[i];
+                        if (!allMimeTypes.find(m => m.type === mt.type)) {
+                            allMimeTypes.push(mt);
+                        }
+                    }
+                });
+                allMimeTypes.forEach((mt, i) => {
+                    Object.defineProperty(mimeTypeArray, i, { value: mt, enumerable: true });
+                    Object.defineProperty(mimeTypeArray, mt.type, { value: mt, enumerable: false });
+                });
+                Object.defineProperty(mimeTypeArray, 'length', { value: allMimeTypes.length, enumerable: true });
+                mimeTypeArray.item = function(index) { return this[index] || null; };
+                mimeTypeArray.namedItem = function(name) { return this[name] || null; };
+
+                // 覆盖 navigator.plugins
                 Object.defineProperty(navigator, 'plugins', {
-                    get: createPluginArray,
+                    get: () => pluginArray,
                     configurable: true
                 });
-                
-                const createMimeTypesArray = () => {
-                    const mimeTypes = [
-                        {
-                            type: 'application/pdf',
-                            suffixes: 'pdf',
-                            description: 'Portable Document Format',
-                            enabledPlugin: navigator.plugins[0]
-                        },
-                        {
-                            type: 'text/pdf',
-                            suffixes: 'pdf',
-                            description: 'Portable Document Format',
-                            enabledPlugin: navigator.plugins[0]
-                        },
-                        {
-                            type: 'application/x-nacl',
-                            suffixes: '',
-                            description: 'Native Client Executable',
-                            enabledPlugin: navigator.plugins[2]
-                        },
-                        {
-                            type: 'application/x-pnacl',
-                            suffixes: '',
-                            description: 'Portable Native Client Executable',
-                            enabledPlugin: navigator.plugins[2]
-                        }
-                    ];
-                
-                    Object.setPrototypeOf(mimeTypes, MimeTypeArray.prototype);
-                    mimeTypes.item = function(index) { return this[index] || null; };
-                    mimeTypes.namedItem = function(name) {
-                        return Array.from(this).find(m => m.type === name) || null;
-                    };
-                
-                    return mimeTypes;
-                };
-                
+
+                // 覆盖 navigator.mimeTypes
                 Object.defineProperty(navigator, 'mimeTypes', {
-                    get: createMimeTypesArray,
+                    get: () => mimeTypeArray,
                     configurable: true
                 });
                 
@@ -272,19 +323,25 @@ public class StealthScriptProvider {
      */
     public static String getLightStealthScript() {
         return """
-                // 移除自动化标识
-                delete Object.getPrototypeOf(navigator).webdriver;
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                    configurable: true
-                });
-                
+                // 移除自动化标识 - 必须从Navigator.prototype上删除
+                const navigatorProto = Navigator.prototype;
+                if (Object.getOwnPropertyDescriptor(navigatorProto, 'webdriver')) {
+                    Object.defineProperty(navigatorProto, 'webdriver', {
+                        get: () => undefined,
+                        configurable: true
+                    });
+                    delete navigatorProto.webdriver;
+                }
+                if (Object.getOwnPropertyDescriptor(navigator, 'webdriver')) {
+                    delete navigator.webdriver;
+                }
+
                 // 基础语言设置
                 Object.defineProperty(navigator, 'languages', {
                     get: () => ['zh-CN', 'zh', 'en'],
                     configurable: true
                 });
-                
+
                 // 基础平台信息
                 Object.defineProperty(navigator, 'platform', {
                     get: () => 'Win32',

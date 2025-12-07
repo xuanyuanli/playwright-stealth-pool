@@ -152,30 +152,30 @@ class StealthScriptProviderTest {
         @DisplayName("完整脚本应该包含插件模拟")
         void shouldContainPluginSimulationInFullScript() {
             String script = StealthScriptProvider.getStealthScript();
-            
+
             assertThat(script).contains("navigator, 'plugins'");
-            assertThat(script).contains("mockPlugins");
+            assertThat(script).contains("pluginsData");
             assertThat(script).contains("Chrome PDF Viewer");
-            assertThat(script).contains("Native Client");
+            assertThat(script).contains("PDF Viewer");
         }
 
         @Test
         @DisplayName("完整脚本应该包含MIME类型模拟")
         void shouldContainMimeTypeSimulationInFullScript() {
             String script = StealthScriptProvider.getStealthScript();
-            
+
             assertThat(script).contains("navigator, 'mimeTypes'");
-            assertThat(script).contains("mockMimeTypes");
+            assertThat(script).contains("mimeTypeArray");
             assertThat(script).contains("application/pdf");
-            assertThat(script).contains("application/x-nacl");
+            assertThat(script).contains("text/pdf");
         }
 
         @Test
         @DisplayName("轻量级脚本不应该包含插件模拟")
         void shouldNotContainPluginSimulationInLightScript() {
             String script = StealthScriptProvider.getLightStealthScript();
-            
-            assertThat(script).doesNotContain("mockPlugins");
+
+            assertThat(script).doesNotContain("pluginsData");
             assertThat(script).doesNotContain("Chrome PDF Viewer");
             // 注意：轻量级脚本可能包含navigator.plugins的引用，但不包含完整的模拟实现
         }
