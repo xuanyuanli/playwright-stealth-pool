@@ -182,6 +182,9 @@ public class PlaywrightManager implements AutoCloseable {
 
         BrowserContext browserContext = null;
         Page page = null;
+        boolean pageClosed = false;
+        boolean contextClosed = false;
+        
         try {
             // 创建浏览器上下文
             browserContext = browser.newContext(config.getNewContextOptions());
@@ -222,21 +225,42 @@ public class PlaywrightManager implements AutoCloseable {
             log.error("Page operation failed", e);
             throw new RuntimeException("Page operation failed", e);
         } finally {
-            // 确保资源正确释放
-            if (page != null) {
-                try {
-                    page.close();
-                } catch (Exception e) {
-                    log.warn("Failed to close page", e);
-                }
+            // 确保资源正确释放 - 使用独立的方法处理每个资源
+            // 这样可以确保即使一个资源关闭失败，其他资源仍会被尝试关闭
+            pageClosed = closeResourceSafely(page, "page");
+            contextClosed = closeResourceSafely(browserContext, "browser context");
+            
+            // 记录资源释放状态
+            if (!pageClosed && page != null) {
+                log.warn("Page may not have been properly closed");
             }
-            if (browserContext != null) {
-                try {
-                    browserContext.close();
-                } catch (Exception e) {
-                    log.warn("Failed to close browser context", e);
-                }
+            if (!contextClosed && browserContext != null) {
+                log.warn("BrowserContext may not have been properly closed");
             }
+            
+            log.debug("Resource cleanup completed - Page closed: {}, Context closed: {}", pageClosed, contextClosed);
+        }
+    }
+    
+    /**
+     * 安全地关闭资源，捕获并记录任何异常
+     * 
+     * @param closeable 可关闭的资源
+     * @param resourceName 资源名称（用于日志）
+     * @return true如果资源成功关闭或不需要关闭，false如果关闭失败
+     */
+    private static boolean closeResourceSafely(AutoCloseable closeable, String resourceName) {
+        if (closeable == null) {
+            return true; // 资源不存在，视为已处理
+        }
+        
+        try {
+            closeable.close();
+            log.debug("Successfully closed {}", resourceName);
+            return true;
+        } catch (Exception e) {
+            log.warn("Failed to close {}: {}", resourceName, e.getMessage());
+            return false;
         }
     }
 

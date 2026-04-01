@@ -242,25 +242,42 @@ class PlaywrightBrowserFactoryTest {
         @Test
         @DisplayName("有效的Browser应该通过验证")
         void shouldValidateHealthyBrowser() {
+            when(mockBrowser.isConnected()).thenReturn(true);
             when(mockBrowser.contexts()).thenReturn(List.of(mockContext));
             
             PooledObject<Browser> pooledObject = new DefaultPooledObject<>(mockBrowser);
             boolean isValid = factory.validateObject(pooledObject);
             
             assertThat(isValid).isTrue();
+            verify(mockBrowser, times(1)).isConnected();
             verify(mockBrowser, times(1)).contexts();
         }
 
         @Test
         @DisplayName("无效的Browser应该验证失败")
         void shouldFailValidationForInvalidBrowser() {
+            when(mockBrowser.isConnected()).thenReturn(true);
             when(mockBrowser.contexts()).thenThrow(new RuntimeException("Browser closed"));
             
             PooledObject<Browser> pooledObject = new DefaultPooledObject<>(mockBrowser);
             boolean isValid = factory.validateObject(pooledObject);
             
             assertThat(isValid).isFalse();
+            verify(mockBrowser, times(1)).isConnected();
             verify(mockBrowser, times(1)).contexts();
+        }
+        
+        @Test
+        @DisplayName("未连接的Browser应该验证失败")
+        void shouldFailValidationForDisconnectedBrowser() {
+            when(mockBrowser.isConnected()).thenReturn(false);
+            
+            PooledObject<Browser> pooledObject = new DefaultPooledObject<>(mockBrowser);
+            boolean isValid = factory.validateObject(pooledObject);
+            
+            assertThat(isValid).isFalse();
+            verify(mockBrowser, times(1)).isConnected();
+            verify(mockBrowser, never()).contexts();
         }
 
         @Test

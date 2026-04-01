@@ -10,7 +10,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.pool2.BasePooledObjectFactory;
 import org.apache.commons.pool2.PooledObject;
 import org.apache.commons.pool2.impl.DefaultPooledObject;
-import cn.xuanyuanli.core.util.Envs;
 
 /**
  * Playwright浏览器实例工厂类
@@ -112,13 +111,29 @@ public class PlaywrightBrowserFactory extends BasePooledObjectFactory<Browser> {
      */
     @Override
     public boolean validateObject(PooledObject<Browser> pooledBrowser) {
+        if (pooledBrowser == null) {
+            log.warn("PooledBrowser is null, validation failed");
+            return false;
+        }
+        
         Browser browser = pooledBrowser.getObject();
+        if (browser == null) {
+            log.warn("Browser object is null, validation failed");
+            return false;
+        }
+        
         try {
+            // 首先检查Browser是否仍然连接
+            if (!browser.isConnected()) {
+                log.warn("Browser is not connected, validation failed");
+                return false;
+            }
+            
             // 尝试获取浏览器上下文列表来验证Browser是否有效
             browser.contexts();
             return true;
         } catch (Exception e) {
-            log.warn("Browser validation failed, will be destroyed and recreated", e);
+            log.warn("Browser validation failed, will be destroyed and recreated: {}", e.getMessage());
             return false;
         }
     }
@@ -138,37 +153,65 @@ public class PlaywrightBrowserFactory extends BasePooledObjectFactory<Browser> {
      */
     @Override
     public void destroyObject(PooledObject<Browser> pooledBrowser) {
+        if (pooledBrowser == null) {
+            log.warn("PooledBrowser is null, skipping destroy");
+            return;
+        }
+        
         Browser browser = pooledBrowser.getObject();
+        if (browser == null) {
+            log.warn("Browser object is null, skipping destroy");
+            return;
+        }
+        
         Playwright playwright = null;
+        boolean playwrightClosed = false;
+        boolean browserClosed = false;
         
         try {
             // 获取关联的Playwright实例
-            playwright = PLAYWRIGHT_CACHE.get(browser);
+            playwright = PLAYWRIGHT_CACHE.remove(browser);
             
             if (playwright != null) {
                 // 先关闭Playwright（会自动关闭相关Browser）
-                playwright.close();
-                log.debug("Playwright instance closed successfully");
+                try {
+                    playwright.close();
+                    playwrightClosed = true;
+                    log.debug("Playwright instance closed successfully");
+                } catch (Exception e) {
+                    log.warn("Error closing Playwright instance: {}", e.getMessage());
+                }
             }
             
         } catch (Exception e) {
-            log.warn("Error closing Playwright instance", e);
+            log.warn("Error during Playwright cleanup: {}", e.getMessage());
         } finally {
-            // 清理缓存 - 需要检查null以避免NullPointerException
-            if (browser != null) {
-                PLAYWRIGHT_CACHE.remove(browser);
-            }
-            
-            // 确保Browser也被关闭
-            try {
-                if (browser != null && browser.isConnected()) { // 检查连接状态
+            // 确保Browser也被关闭 - 无论缓存中是否有对应的Playwright
+            // 如果Playwright已成功关闭，Browser应该已经被关闭
+            // 但为了安全起见，仍然检查并尝试关闭
+            if (!playwrightClosed || browser.isConnected()) {
+                try {
                     browser.close();
+                    browserClosed = true;
+                    log.debug("Browser instance closed successfully");
+                } catch (Exception e) {
+                    log.warn("Error closing Browser instance: {}", e.getMessage());
                 }
-            } catch (Exception e) {
-                log.warn("Error closing Browser instance", e);
+            } else {
+                browserClosed = true;
+                log.debug("Browser was already closed by Playwright");
             }
         }
         
-        log.debug("Browser destroyed successfully. Cache size: {}", PLAYWRIGHT_CACHE.size());
+        // 如果资源未完全释放，记录警告日志
+        if (!playwrightClosed && playwright != null) {
+            log.warn("Playwright instance may not have been properly closed");
+        }
+        if (!browserClosed) {
+            log.warn("Browser instance may not have been properly closed");
+        }
+        
+        log.debug("Browser destroyed. Playwright closed: {}, Browser closed: {}, Remaining cache size: {}", 
+                playwrightClosed, browserClosed, PLAYWRIGHT_CACHE.size());
     }
 }

@@ -107,9 +107,9 @@ public class PlaywrightBrowserManager implements AutoCloseable {
             poolConfig.setMaxTotal(capacity);
             poolConfig.setMaxIdle(capacity);
             poolConfig.setMinIdle(1);
-            // 设置空闲对象检查和清理
-            poolConfig.setTimeBetweenEvictionRuns(Duration.ofMinutes(30));
-            poolConfig.setMinEvictableIdleDuration(Duration.ofHours(1));
+            // 设置空闲对象检查和清理 - 缩短间隔避免资源长期占用
+            poolConfig.setTimeBetweenEvictionRuns(Duration.ofMinutes(5)); // 从30分钟缩短到5分钟
+            poolConfig.setMinEvictableIdleDuration(Duration.ofMinutes(10)); // 从1小时缩短到10分钟
             poolConfig.setTestWhileIdle(true);
             // 设置等待策略
             poolConfig.setBlockWhenExhausted(true);

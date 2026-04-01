@@ -295,18 +295,29 @@ public class StealthScriptProvider {
                 }
                 
                 // ==================== 控制台调试检测对抗 ====================
-                // 防止通过控制台调试检测
-                let devtools = { open: false, orientation: null };
-                setInterval(() => {
-                    if (window.outerHeight - window.innerHeight > 200 ||
-                        window.outerWidth - window.innerWidth > 200) {
-                        devtools.open = true;
-                        devtools.orientation = window.outerHeight - window.innerHeight > 200 ? 'vertical' : 'horizontal';
-                    } else {
-                        devtools.open = false;
-                        devtools.orientation = null;
-                    }
-                }, 500);
+                // 防止通过控制台调试检测 - 使用低频率检测避免CPU占用
+                (function() {
+                    let devtools = { open: false, orientation: null };
+                    let checkCount = 0;
+                    const maxChecks = 10; // 最多检测10次后停止
+                
+                    const intervalId = setInterval(() => {
+                        checkCount++;
+                        if (checkCount >= maxChecks) {
+                            clearInterval(intervalId); // 停止检测，避免长期占用CPU
+                            return;
+                        }
+                
+                        if (window.outerHeight - window.innerHeight > 200 ||
+                            window.outerWidth - window.innerWidth > 200) {
+                            devtools.open = true;
+                            devtools.orientation = window.outerHeight - window.innerHeight > 200 ? 'vertical' : 'horizontal';
+                        } else {
+                            devtools.open = false;
+                            devtools.orientation = null;
+                        }
+                    }, 5000); // 从500ms改为5000ms，降低检测频率
+                })();
                 """;
     }
 
