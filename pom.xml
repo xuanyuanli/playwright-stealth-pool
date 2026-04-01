@@ -8,7 +8,7 @@
         <relativePath/>
     </parent>
     <artifactId>playwright-stealth-pool</artifactId>
-    <version>1.2.2</version>
+    <version>1.2.3</version>
     <packaging>jar</packaging>
     <name>Playwright Stealth Pool</name>
     <description>Playwright反检测连接池管理</description>
