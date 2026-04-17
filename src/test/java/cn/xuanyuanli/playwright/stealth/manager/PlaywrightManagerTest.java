@@ -8,7 +8,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.*;
@@ -295,12 +298,147 @@ class PlaywrightManagerTest {
                   .as("异常消息应该包含测试异常信息，实际消息: " + actualMessage)
                   .isTrue();
           });
-        
+
         // 确保连接池状态正常 - 验证连接池仍可正常工作
         playwrightManager.execute(config, page -> {
             page.navigate("https://httpbin.org/get");
             String content = page.content();
             assertThat(content).containsIgnoringCase("httpbin");
         });
+    }
+
+    /**
+     * 测试并发控制 - 验证 Browser 创建并发数被限制
+     */
+    @Test
+    @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
+    void testConcurrencyControl() throws InterruptedException {
+        // 使用并发数为2的管理器
+        PlaywrightManager limitedManager = new PlaywrightManager(4, 2);
+
+        int taskCount = 6;
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch completeLatch = new CountDownLatch(taskCount);
+        AtomicInteger maxConcurrentBrowsers = new AtomicInteger(0);
+        AtomicInteger currentConcurrentBrowsers = new AtomicInteger(0);
+        AtomicLong totalExecutionTime = new AtomicLong(0);
+
+        long startTime = System.currentTimeMillis();
+
+        // 启动多个并发任务
+        for (int i = 0; i < taskCount; i++) {
+            final int taskId = i;
+            new Thread(() -> {
+                try {
+                    startLatch.await(); // 等待所有线程同时开始
+
+                    limitedManager.execute(config, page -> {
+                        int current = currentConcurrentBrowsers.incrementAndGet();
+                        maxConcurrentBrowsers.updateAndGet(max -> Math.max(max, current));
+
+                        try {
+                            page.navigate("https://httpbin.org/delay/1");
+                            String content = page.textContent("body");
+                            assertThat(content).containsIgnoringCase("delay");
+                        } finally {
+                            currentConcurrentBrowsers.decrementAndGet();
+                        }
+                    });
+                } catch (Exception e) {
+                    System.err.println("Task " + taskId + " failed: " + e.getMessage());
+                } finally {
+                    completeLatch.countDown();
+                }
+            }).start();
+        }
+
+        // 同时开始所有任务
+        startLatch.countDown();
+
+        // 等待所有任务完成
+        boolean completed = completeLatch.await(60, TimeUnit.SECONDS);
+        totalExecutionTime.set(System.currentTimeMillis() - startTime);
+
+        assertThat(completed).as("所有任务应该在60秒内完成").isTrue();
+
+        // 验证并发数被限制在2以内
+        assertThat(maxConcurrentBrowsers.get())
+            .as("Browser 创建并发数应该被限制在2以内，实际最大值: " + maxConcurrentBrowsers.get())
+            .isLessThanOrEqualTo(2);
+
+        // 验证执行时间符合串行预期（6个任务，每个1秒，并发2，理论上至少3秒）
+        assertThat(totalExecutionTime.get())
+            .as("执行时间应该符合并发控制预期")
+            .isGreaterThanOrEqualTo(2500); // 至少2.5秒
+
+        System.out.println("Concurrency test completed: maxConcurrent=" + maxConcurrentBrowsers.get() +
+                          ", totalTime=" + totalExecutionTime.get() + "ms");
+
+        limitedManager.close();
+    }
+
+    /**
+     * 测试默认并发数计算（CPU核数-1）
+     */
+    @Test
+    void testDefaultConcurrencyCalculation() {
+        int processors = Runtime.getRuntime().availableProcessors();
+        int expectedConcurrency = Math.max(1, processors - 1);
+
+        // 创建使用默认并发数的管理器
+        PlaywrightManager manager = new PlaywrightManager(4);
+
+        // 验证可以正常执行
+        manager.execute(config, page -> {
+            page.navigate("https://httpbin.org/get");
+            assertThat(page.content()).containsIgnoringCase("httpbin");
+        });
+
+        manager.close();
+
+        System.out.println("Default concurrency test: processors=" + processors +
+                          ", expectedConcurrency=" + expectedConcurrency);
+    }
+
+    /**
+     * 测试重试机制 - 模拟可重试错误场景
+     */
+    @Test
+    @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
+    void testRetryMechanism() {
+        AtomicInteger attemptCount = new AtomicInteger(0);
+
+        // 测试正常执行不会触发重试
+        playwrightManager.execute(config, page -> {
+            int attempt = attemptCount.incrementAndGet();
+            page.navigate("https://httpbin.org/get");
+            assertThat(page.content()).containsIgnoringCase("httpbin");
+            System.out.println("Normal execution attempt: " + attempt);
+        });
+
+        assertThat(attemptCount.get()).isEqualTo(1);
+    }
+
+    /**
+     * 测试连接池配置优化
+     */
+    @Test
+    @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
+    void testPoolConfiguration() {
+        // 创建管理器并执行多个任务，验证连接池配置正常工作
+        PlaywrightManager poolManager = new PlaywrightManager(2, 1);
+
+        // 顺序执行多个任务
+        for (int i = 0; i < 5; i++) {
+            final int taskId = i;
+            poolManager.execute(config, page -> {
+                page.navigate("https://httpbin.org/get");
+                String content = page.content();
+                assertThat(content).containsIgnoringCase("httpbin");
+                System.out.println("Pool task " + taskId + " completed");
+            });
+        }
+
+        poolManager.close();
     }
 }

@@ -8,13 +8,15 @@ import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType.LaunchOptions;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.PlaywrightException;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.pool2.impl.GenericObjectPool;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import java.util.function.Consumer;
 
 /**
@@ -62,32 +64,78 @@ public class PlaywrightManager implements AutoCloseable {
     private final GenericObjectPool<Playwright> pool;
 
     /**
+     * Browser创建并发控制信号量
+     */
+    private final Semaphore browserCreationSemaphore;
+
+    /**
+     * 默认最大重试次数
+     */
+    private static final int DEFAULT_MAX_RETRIES = 3;
+
+    /**
+     * 默认重试间隔（毫秒）
+     */
+    private static final long DEFAULT_RETRY_DELAY_MS = 500;
+
+    /**
+     * 连接池最大等待时间（毫秒）
+     */
+    private static final long DEFAULT_MAX_WAIT_MILLIS = 30000;
+
+    /**
      * 创建Playwright管理器
      *
      * @param capacity 连接池最大容量
      */
     public PlaywrightManager(int capacity) {
-        this(null, capacity);
+        this(null, capacity, getDefaultConcurrency());
     }
 
     /**
      * 创建Playwright管理器
      *
-     * @param poolConfig 连接池配置，为null时使用默认配置
-     * @param capacity   连接池最大容量
+     * @param capacity       连接池最大容量
+     * @param maxConcurrency 最大Browser创建并发数（建议不超过系统资源限制）
      */
-    public PlaywrightManager(GenericObjectPoolConfig<Playwright> poolConfig, int capacity) {
+    public PlaywrightManager(int capacity, int maxConcurrency) {
+        this(null, capacity, maxConcurrency);
+    }
+
+    /**
+     * 创建Playwright管理器
+     *
+     * @param poolConfig     连接池配置，为null时使用默认配置
+     * @param capacity       连接池最大容量
+     * @param maxConcurrency 最大Browser创建并发数
+     */
+    public PlaywrightManager(GenericObjectPoolConfig<Playwright> poolConfig, int capacity, int maxConcurrency) {
         if (poolConfig == null) {
             poolConfig = new GenericObjectPoolConfig<>();
             poolConfig.setMaxTotal(capacity);
             poolConfig.setMinIdle(1);
             poolConfig.setMaxIdle(capacity);
-            poolConfig.setTestOnBorrow(false);
+            poolConfig.setTestOnBorrow(true);
             poolConfig.setTestOnReturn(false);
+            poolConfig.setBlockWhenExhausted(true);
+            poolConfig.setMaxWait(Duration.ofMillis(DEFAULT_MAX_WAIT_MILLIS));
         }
 
         this.pool = new GenericObjectPool<>(new PlaywrightFactory(), poolConfig);
-        log.info("PlaywrightManager initialized with pool capacity: {}", capacity);
+        this.browserCreationSemaphore = new Semaphore(maxConcurrency);
+        log.info("PlaywrightManager initialized with pool capacity: {}, max browser concurrency: {}", capacity, maxConcurrency);
+    }
+
+    /**
+     * 获取默认并发数（CPU核数-1，最小为1）
+     *
+     * @return 默认并发数
+     */
+    private static int getDefaultConcurrency() {
+        int processors = Runtime.getRuntime().availableProcessors();
+        int concurrency = Math.max(1, processors - 1);
+        log.debug("Default browser concurrency calculated: {} (based on {} processors)", concurrency, processors);
+        return concurrency;
     }
 
     /**
@@ -119,28 +167,124 @@ public class PlaywrightManager implements AutoCloseable {
      * @param pageConsumer            页面操作函数
      * @throws RuntimeException       当操作执行失败时
      */
-    public void execute(PlaywrightConfig config, Consumer<BrowserContext> browserContextConsumer, 
+    public void execute(PlaywrightConfig config, Consumer<BrowserContext> browserContextConsumer,
                        Consumer<Page> pageConsumer) {
+        executeWithRetry(config, browserContextConsumer, pageConsumer);
+    }
+
+    /**
+     * 带重试机制的执行方法
+     *
+     * @param config                 Playwright配置
+     * @param browserContextConsumer 浏览器上下文配置函数
+     * @param pageConsumer           页面操作函数
+     */
+    private void executeWithRetry(PlaywrightConfig config, Consumer<BrowserContext> browserContextConsumer,
+                                  Consumer<Page> pageConsumer) {
         if (config == null) {
             config = new PlaywrightConfig();
         }
 
-        Playwright playwright = null;
-        try {
-            playwright = pool.borrowObject();
-            executeInternal(config, browserContextConsumer, pageConsumer, playwright);
-        } catch (Exception e) {
-            log.error("Failed to execute playwright operation", e);
-            throw new RuntimeException("Playwright operation failed", e);
-        } finally {
-            if (playwright != null) {
-                try {
-                    pool.returnObject(playwright);
-                } catch (Exception e) {
-                    log.warn("Failed to return playwright object to pool", e);
+        int attempt = 0;
+        long retryDelay = DEFAULT_RETRY_DELAY_MS;
+
+        while (true) {
+            attempt++;
+            Playwright playwright = null;
+
+            try {
+                playwright = pool.borrowObject();
+                executeInternal(config, browserContextConsumer, pageConsumer, playwright);
+
+                // 如果之前有过重试，记录成功恢复
+                if (attempt > 1) {
+                    log.info("Playwright operation succeeded after {} attempt(s)", attempt);
+                }
+                return;
+
+            } catch (Exception e) {
+                // 判断是否需要重试
+                if (attempt <= PlaywrightManager.DEFAULT_MAX_RETRIES && isRetryableError(e)) {
+                    log.warn("Playwright operation failed (attempt {}/{}), will retry in {}ms. Error: {}",
+                            attempt, PlaywrightManager.DEFAULT_MAX_RETRIES + 1, retryDelay, e.getMessage());
+
+                    // 归还连接池对象
+                    if (playwright != null) {
+                        try {
+                            pool.returnObject(playwright);
+                            playwright = null;
+                        } catch (Exception returnEx) {
+                            log.warn("Failed to return playwright object to pool during retry: {}", returnEx.getMessage());
+                        }
+                    }
+
+                    // 等待后重试
+                    try {
+                        Thread.sleep(retryDelay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Playwright operation interrupted during retry", ie);
+                    }
+
+                    // 指数退避
+                    retryDelay *= 2;
+                    continue;
+                }
+
+                // 不需要重试或重试次数用尽
+                log.error("Failed to execute playwright operation after {} attempt(s)", attempt, e);
+                throw new RuntimeException("Playwright operation failed", e);
+
+            } finally {
+                if (playwright != null) {
+                    try {
+                        pool.returnObject(playwright);
+                    } catch (Exception returnEx) {
+                        log.warn("Failed to return playwright object to pool: {}", returnEx.getMessage());
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * 判断错误是否可重试
+     *
+     * @param e 异常
+     * @return true表示可重试
+     */
+    private boolean isRetryableError(Exception e) {
+        Throwable cause = e;
+        while (cause != null) {
+            if (cause instanceof PlaywrightException) {
+                String message = cause.getMessage();
+                if (message != null) {
+                    String upperMessage = message.toUpperCase();
+                    // 资源类错误
+                    if (upperMessage.contains("EAGAIN") ||
+                        upperMessage.contains("EMFILE") ||
+                        upperMessage.contains("ENFILE") ||
+                        upperMessage.contains("RESOURCE TEMPORARILY UNAVAILABLE")) {
+                        log.debug("Detected retryable resource error: {}", message);
+                        return true;
+                    }
+                    // spawn 失败
+                    if (message.contains("spawn") && message.contains("Error")) {
+                        log.debug("Detected retryable spawn error: {}", message);
+                        return true;
+                    }
+                    // 连接类错误
+                    if (upperMessage.contains("ECONNREFUSED") ||
+                        upperMessage.contains("ECONNRESET") ||
+                        upperMessage.contains("ETIMEDOUT")) {
+                        log.debug("Detected retryable connection error: {}", message);
+                        return true;
+                    }
+                }
+            }
+            cause = cause.getCause();
+        }
+        return false;
     }
 
     /**
@@ -182,8 +326,8 @@ public class PlaywrightManager implements AutoCloseable {
 
         BrowserContext browserContext = null;
         Page page = null;
-        boolean pageClosed = false;
-        boolean contextClosed = false;
+        boolean pageClosed;
+        boolean contextClosed;
         
         try {
             // 创建浏览器上下文
@@ -231,10 +375,10 @@ public class PlaywrightManager implements AutoCloseable {
             contextClosed = closeResourceSafely(browserContext, "browser context");
             
             // 记录资源释放状态
-            if (!pageClosed && page != null) {
+            if (!pageClosed) {
                 log.warn("Page may not have been properly closed");
             }
-            if (!contextClosed && browserContext != null) {
+            if (!contextClosed) {
                 log.warn("BrowserContext may not have been properly closed");
             }
             
@@ -317,24 +461,34 @@ public class PlaywrightManager implements AutoCloseable {
     }
 
     /**
-     * 获取连接池状态信息
-     *
-     * @return 连接池状态描述
+     * 内部执行方法（带并发控制）
      */
-    public String getPoolStatus() {
-        return String.format("Pool Status - Active: %d, Idle: %d, Total: %d/%d",
-                pool.getNumActive(), pool.getNumIdle(), 
-                pool.getNumActive() + pool.getNumIdle(), pool.getMaxTotal());
-    }
-
-    /**
-     * 内部执行方法
-     */
-    private void executeInternal(PlaywrightConfig config, 
+    private void executeInternal(PlaywrightConfig config,
                                Consumer<BrowserContext> browserContextConsumer,
-                               Consumer<Page> pageConsumer, 
+                               Consumer<Page> pageConsumer,
                                Playwright playwright) {
-        executeWithPlaywright(config, browserContextConsumer, pageConsumer, playwright);
+        if (config == null) {
+            config = new PlaywrightConfig();
+        }
+
+        // 使用信号量控制 Browser 创建并发
+        long acquireStart = System.currentTimeMillis();
+        try {
+            browserCreationSemaphore.acquire();
+            long acquireTime = System.currentTimeMillis() - acquireStart;
+            if (acquireTime > 100) {
+                log.debug("Waited {}ms for browser creation permit", acquireTime);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting for browser creation permit", e);
+        }
+
+        try (Browser browser = createBrowser(config, playwright)) {
+            executeWithBrowser(config, browserContextConsumer, pageConsumer, browser);
+        } finally {
+            browserCreationSemaphore.release();
+        }
     }
 
     @Override
