@@ -409,6 +409,46 @@ public class PlaywrightManager implements AutoCloseable {
     }
 
     /**
+     * 根据配置构建 Chromium 启动参数列表
+     *
+     * @param config Playwright 配置
+     * @return 启动参数列表（内置参数在前，{@link PlaywrightConfig#getExtraLaunchArgs()} 在后）
+     */
+    static List<String> buildLaunchArgs(PlaywrightConfig config) {
+        if (config == null) {
+            config = new PlaywrightConfig();
+        }
+
+        List<String> args = new ArrayList<>();
+
+        if (config.isDisableImageRender()) {
+            args.add("--blink-settings=imagesEnabled=false");
+        }
+
+        if (config.isDisableAutomationControlled()) {
+            args.add("--disable-blink-features=AutomationControlled");
+        }
+
+        if (config.isDisableGpu()) {
+            args.add("--disable-gpu");
+        }
+
+        if (config.isStartMaximized()) {
+            args.add("--start-maximized");
+        }
+
+        if (config.getExtraLaunchArgs() != null) {
+            for (String arg : config.getExtraLaunchArgs()) {
+                if (arg != null && !arg.isBlank()) {
+                    args.add(arg.trim());
+                }
+            }
+        }
+
+        return args;
+    }
+
+    /**
      * 创建配置好的Browser实例
      *
      * @param config     配置
@@ -420,24 +460,7 @@ public class PlaywrightManager implements AutoCloseable {
             config = new PlaywrightConfig();
         }
 
-        // 构建启动参数
-        List<String> args = new ArrayList<>();
-        
-        if (config.isDisableImageRender()) {
-            args.add("--blink-settings=imagesEnabled=false");
-        }
-        
-        if (config.isDisableAutomationControlled()) {
-            args.add("--disable-blink-features=AutomationControlled");
-        }
-        
-        if (config.isDisableGpu()) {
-            args.add("--disable-gpu");
-        }
-        
-        if (config.isStartMaximized()) {
-            args.add("--start-maximized");
-        }
+        List<String> args = buildLaunchArgs(config);
 
         // 创建启动选项
         LaunchOptions options = new LaunchOptions()

@@ -168,6 +168,16 @@ public class PlaywrightConfig {
      */
     private List<String> customInitScripts;
 
+    /**
+     * 额外的 Chromium 启动参数
+     *
+     * <p>在库内置启动参数（如禁用自动化标识、GPU 等）之后追加。
+     * 适用于需要传入 Playwright 未封装的 {@code --} 开关的场景。</p>
+     *
+     * <p>默认值：null（不追加额外参数）</p>
+     */
+    private List<String> extraLaunchArgs;
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -187,14 +197,15 @@ public class PlaywrightConfig {
                 Objects.equals(slowMo, that.slowMo) &&
                 Objects.equals(contextOptionsToString(), that.contextOptionsToString()) &&
                 Objects.equals(proxyToString(), that.proxyToString()) &&
-                Objects.equals(customInitScripts, that.customInitScripts);
+                Objects.equals(customInitScripts, that.customInitScripts) &&
+                Objects.equals(extraLaunchArgs, that.extraLaunchArgs);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(disableAutomationControlled, disableGpu, disableImageRender,
                 startMaximized, headless, chromiumSandbox, stealthMode, slowMo,
-                contextOptionsToString(), proxyToString(), customInitScripts);
+                contextOptionsToString(), proxyToString(), customInitScripts, extraLaunchArgs);
     }
 
     /**

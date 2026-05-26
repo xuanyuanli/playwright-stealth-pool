@@ -55,6 +55,7 @@ class PlaywrightConfigTest {
             assertThat(config.getNewContextOptions()).isNotNull();
             assertThat(config.getProxy()).isNull();
             assertThat(config.getCustomInitScripts()).isNull();
+            assertThat(config.getExtraLaunchArgs()).isNull();
         }
 
         @Test
@@ -147,6 +148,17 @@ class PlaywrightConfigTest {
             assertThat(config.getCustomInitScripts()).isEqualTo(scripts);
             assertThat(config.getCustomInitScripts()).hasSize(2);
         }
+
+        @Test
+        @DisplayName("应该支持额外启动参数配置")
+        void shouldSupportExtraLaunchArgsConfiguration() {
+            List<String> extraArgs = List.of("--lang=zh-CN", "--window-size=1280,720");
+
+            PlaywrightConfig result = config.setExtraLaunchArgs(extraArgs);
+
+            assertThat(result).isSameAs(config);
+            assertThat(config.getExtraLaunchArgs()).isEqualTo(extraArgs);
+        }
     }
 
     @Nested
@@ -161,12 +173,14 @@ class PlaywrightConfigTest {
                 config.setProxy(null);
                 config.setNewContextOptions(null);
                 config.setCustomInitScripts(null);
+                config.setExtraLaunchArgs(null);
             }).doesNotThrowAnyException();
 
             assertThat(config.getSlowMo()).isNull();
             assertThat(config.getProxy()).isNull();
             assertThat(config.getNewContextOptions()).isNull();
             assertThat(config.getCustomInitScripts()).isNull();
+            assertThat(config.getExtraLaunchArgs()).isNull();
         }
 
         @Test
@@ -291,6 +305,21 @@ class PlaywrightConfigTest {
             PlaywrightConfig config2 = new PlaywrightConfig().setNewContextOptions(options2);
 
             assertThat(config1).isNotEqualTo(config2);
+        }
+
+        @Test
+        @DisplayName("包含额外启动参数的对象应该正确比较")
+        void shouldCompareExtraLaunchArgsConfiguration() {
+            List<String> args1 = List.of("--lang=zh-CN", "--window-size=1280,720");
+            List<String> args2 = List.of("--lang=en-US");
+
+            PlaywrightConfig config1 = new PlaywrightConfig().setExtraLaunchArgs(args1);
+            PlaywrightConfig config2 = new PlaywrightConfig().setExtraLaunchArgs(args2);
+            PlaywrightConfig config3 = new PlaywrightConfig().setExtraLaunchArgs(args1);
+
+            assertThat(config1).isNotEqualTo(config2);
+            assertThat(config1).isEqualTo(config3);
+            assertThat(config1.hashCode()).isEqualTo(config3.hashCode());
         }
 
         @Test

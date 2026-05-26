@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -440,5 +441,37 @@ class PlaywrightManagerTest {
         }
 
         poolManager.close();
+    }
+
+    @Test
+    void shouldBuildLaunchArgsWithBuiltInFlags() {
+        PlaywrightConfig minimalConfig = new PlaywrightConfig()
+                .setDisableImageRender(false)
+                .setDisableAutomationControlled(false)
+                .setDisableGpu(false)
+                .setStartMaximized(false);
+
+        assertThat(PlaywrightManager.buildLaunchArgs(minimalConfig)).isEmpty();
+    }
+
+    @Test
+    void shouldAppendExtraLaunchArgsAfterBuiltInFlags() {
+        PlaywrightConfig testConfig = new PlaywrightConfig()
+                .setDisableImageRender(false)
+                .setDisableAutomationControlled(true)
+                .setDisableGpu(false)
+                .setStartMaximized(false)
+                .setExtraLaunchArgs(Arrays.asList(
+                        "--lang=zh-CN",
+                        "  --window-size=1280,720  ",
+                        "",
+                        null
+                ));
+
+        assertThat(PlaywrightManager.buildLaunchArgs(testConfig)).containsExactly(
+                "--disable-blink-features=AutomationControlled",
+                "--lang=zh-CN",
+                "--window-size=1280,720"
+        );
     }
 }
