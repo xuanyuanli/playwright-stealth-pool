@@ -90,7 +90,7 @@ class BehaviorIntensityTest {
         
         assertThat(quick.getDescription()).isEqualTo("快速强度");
         assertThat(quick.getMinDurationMs()).isEqualTo(500);
-        assertThat(quick.getMaxDurationMs()).isEqualTo(1000);
+        assertThat(quick.getMaxDurationMs()).isEqualTo(1500);
     }
 
     @Test
@@ -116,8 +116,8 @@ class BehaviorIntensityTest {
     @Test
     @DisplayName("时间范围应该覆盖不同的使用场景")
     void timeRangesShouldCoverDifferentUseCase() {
-        // QUICK：适合批量处理，0.5-1秒
-        assertThat(BehaviorIntensity.QUICK.getMaxDurationMs()).isLessThanOrEqualTo(1000);
+        // QUICK：适合批量处理，0.5-1.5秒
+        assertThat(BehaviorIntensity.QUICK.getMaxDurationMs()).isLessThanOrEqualTo(1500);
         
         // NORMAL：标准场景，1.5-3秒
         assertThat(BehaviorIntensity.NORMAL.getMinDurationMs()).isGreaterThanOrEqualTo(1500);

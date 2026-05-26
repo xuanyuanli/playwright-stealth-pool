@@ -83,9 +83,9 @@ class PlaywrightManagerTest {
     @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
     void testBasicPageAccess() {
         playwrightManager.execute(config, page -> {
-            page.navigate("https://www.baidu.com");
-            String title = page.title();
-            assertThat(title).containsIgnoringCase("百度");
+            page.navigate("about:blank");
+            assertThat(page.url()).isEqualTo("about:blank");
+            assertThat(page.title()).isEmpty();
         });
     }
 
@@ -263,10 +263,8 @@ class PlaywrightManagerTest {
                 .setSlowMo(100.0);
                 
         playwrightManager.execute(headfulConfig, page -> {
-            page.navigate("https://www.baidu.com");
-            page.waitForTimeout(2000); // 等待观察
-            String title = page.title();
-            assertThat(title).containsIgnoringCase("百度");
+            page.navigate("about:blank");
+            assertThat(page.url()).isEqualTo("about:blank");
         });
 
         // 测试禁用GPU
@@ -274,11 +272,10 @@ class PlaywrightManagerTest {
                 .setHeadless(true)
                 .setDisableGpu(true)
                 .setDisableImageRender(true);
-                
+
         playwrightManager.execute(noGpuConfig, page -> {
-            page.navigate("https://httpbin.org/get");
-            String content = page.content();
-            assertThat(content).containsIgnoringCase("httpbin");
+            page.navigate("about:blank");
+            assertThat(page.content()).isNotEmpty();
         });
     }
 

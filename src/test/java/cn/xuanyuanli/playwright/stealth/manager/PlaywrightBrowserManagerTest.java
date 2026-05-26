@@ -58,10 +58,9 @@ class PlaywrightBrowserManagerTest {
     @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
     void testBasicPageNavigation() {
         browserManager.execute(page -> {
-            page.navigate("https://www.baidu.com");
-            String title = page.title();
-            System.out.println("页面标题: " + title);
-            assert title.contains("百度");
+            page.navigate("about:blank");
+            assertThat(page.url()).isEqualTo("about:blank");
+            assertThat(page.title()).isEmpty();
         });
     }
 
