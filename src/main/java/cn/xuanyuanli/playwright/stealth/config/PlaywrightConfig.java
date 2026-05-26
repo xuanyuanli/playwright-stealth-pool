@@ -48,6 +48,16 @@ public class PlaywrightConfig {
     private boolean disableGpu = true;
 
     /**
+     * 是否禁用 /dev/shm 共享内存
+     *
+     * <p>启用后会在启动参数中添加 --disable-dev-shm-usage，
+     * 避免 Linux 容器等环境中 /dev/shm 过小导致浏览器崩溃</p>
+     *
+     * <p>默认值：true</p>
+     */
+    private boolean disableDevShmUsage = true;
+
+    /**
      * 是否禁用图像渲染
      *
      * <p>禁用后会在启动参数中添加 --blink-settings=imagesEnabled=false，
@@ -189,6 +199,7 @@ public class PlaywrightConfig {
         PlaywrightConfig that = (PlaywrightConfig) o;
         return disableAutomationControlled == that.disableAutomationControlled &&
                 disableGpu == that.disableGpu &&
+                disableDevShmUsage == that.disableDevShmUsage &&
                 disableImageRender == that.disableImageRender &&
                 startMaximized == that.startMaximized &&
                 headless == that.headless &&
@@ -203,7 +214,7 @@ public class PlaywrightConfig {
 
     @Override
     public int hashCode() {
-        return Objects.hash(disableAutomationControlled, disableGpu, disableImageRender,
+        return Objects.hash(disableAutomationControlled, disableGpu, disableDevShmUsage, disableImageRender,
                 startMaximized, headless, chromiumSandbox, stealthMode, slowMo,
                 contextOptionsToString(), proxyToString(), customInitScripts, extraLaunchArgs);
     }

@@ -220,6 +220,7 @@ public class PlaywrightManager implements AutoCloseable {
 
                     // 等待后重试
                     try {
+                        //noinspection BusyWait
                         Thread.sleep(retryDelay);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
@@ -431,6 +432,10 @@ public class PlaywrightManager implements AutoCloseable {
 
         if (config.isDisableGpu()) {
             args.add("--disable-gpu");
+        }
+
+        if (config.isDisableDevShmUsage()) {
+            args.add("--disable-dev-shm-usage");
         }
 
         if (config.isStartMaximized()) {

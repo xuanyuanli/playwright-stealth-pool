@@ -449,9 +449,22 @@ class PlaywrightManagerTest {
                 .setDisableImageRender(false)
                 .setDisableAutomationControlled(false)
                 .setDisableGpu(false)
+                .setDisableDevShmUsage(false)
                 .setStartMaximized(false);
 
         assertThat(PlaywrightManager.buildLaunchArgs(minimalConfig)).isEmpty();
+    }
+
+    @Test
+    void shouldIncludeDisableDevShmUsageByDefault() {
+        PlaywrightConfig defaultConfig = new PlaywrightConfig()
+                .setDisableImageRender(false)
+                .setDisableAutomationControlled(false)
+                .setDisableGpu(false)
+                .setStartMaximized(false);
+
+        assertThat(PlaywrightManager.buildLaunchArgs(defaultConfig))
+                .contains("--disable-dev-shm-usage");
     }
 
     @Test
@@ -460,6 +473,7 @@ class PlaywrightManagerTest {
                 .setDisableImageRender(false)
                 .setDisableAutomationControlled(true)
                 .setDisableGpu(false)
+                .setDisableDevShmUsage(false)
                 .setStartMaximized(false)
                 .setExtraLaunchArgs(Arrays.asList(
                         "--lang=zh-CN",

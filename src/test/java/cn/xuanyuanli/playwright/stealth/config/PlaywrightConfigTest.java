@@ -46,6 +46,7 @@ class PlaywrightConfigTest {
         void shouldHaveCorrectDefaultValues() {
             assertThat(config.isDisableAutomationControlled()).isTrue();
             assertThat(config.isDisableGpu()).isTrue();
+            assertThat(config.isDisableDevShmUsage()).isTrue();
             assertThat(config.isDisableImageRender()).isTrue();
             assertThat(config.isStartMaximized()).isFalse();
             assertThat(config.isHeadless()).isTrue();
@@ -210,7 +211,7 @@ class PlaywrightConfigTest {
             List<String> singleScript = Collections.singletonList("window.test = true;");
             config.setCustomInitScripts(singleScript);
             assertThat(config.getCustomInitScripts()).hasSize(1);
-            assertThat(config.getCustomInitScripts().get(0)).isEqualTo("window.test = true;");
+            assertThat(config.getCustomInitScripts().getFirst()).isEqualTo("window.test = true;");
 
             // 测试多个脚本
             List<String> multipleScripts = Arrays.asList(
