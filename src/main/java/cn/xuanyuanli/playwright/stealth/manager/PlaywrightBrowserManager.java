@@ -1,7 +1,10 @@
 package cn.xuanyuanli.playwright.stealth.manager;
 
 import cn.xuanyuanli.playwright.stealth.config.PlaywrightConfig;
+import cn.xuanyuanli.playwright.stealth.config.PoolLifecyclePolicy;
 import cn.xuanyuanli.playwright.stealth.pool.PlaywrightBrowserFactory;
+import cn.xuanyuanli.playwright.stealth.pool.RetireDecision;
+import cn.xuanyuanli.playwright.stealth.pool.RetireReason;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.Page;
@@ -10,6 +13,8 @@ import org.apache.commons.pool2.impl.GenericObjectPool;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 
 import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
@@ -20,6 +25,8 @@ import java.util.function.Consumer;
  * <ul>
  *   <li>维护Browser实例连接池，避免频繁启动浏览器的开销</li>
  *   <li>支持Browser实例复用和健康检查</li>
+ *   <li>支持按次数、存活时长和资源压力滚动重建Browser</li>
+ *   <li>空闲驱逐由 Commons Pool2 内置 evictor 驱动（见 {@code timeBetweenEvictionRuns}）</li>
  *   <li>集成反检测脚本和配置管理</li>
  *   <li>提供连接池监控和管理功能</li>
  * </ul>
@@ -66,7 +73,17 @@ public class PlaywrightBrowserManager implements AutoCloseable {
      * Browser实例连接池
      */
     private final GenericObjectPool<Browser> pool;
-    
+
+    private final PlaywrightBrowserFactory browserFactory;
+
+    private final PoolLifecyclePolicy lifecyclePolicy;
+
+    /** 当前正被借出、尚未归还的 Browser 实例 */
+    private final Set<Browser> activeBrowsers = ConcurrentHashMap.newKeySet();
+
+    /** 借用中收到手动淘汰请求时，待归还后作废 */
+    private final Set<Browser> pendingRetirement = ConcurrentHashMap.newKeySet();
+
     /**
      * Playwright配置
      */
@@ -79,7 +96,20 @@ public class PlaywrightBrowserManager implements AutoCloseable {
      * @param capacity        连接池最大容量
      */
     public PlaywrightBrowserManager(PlaywrightConfig playwrightConfig, int capacity) {
-        this(null, playwrightConfig, capacity);
+        this(null, playwrightConfig, capacity, PoolLifecyclePolicy.forBrowserPool());
+    }
+
+    /**
+     * 创建Playwright浏览器管理器
+     *
+     * @param playwrightConfig Playwright配置
+     * @param capacity         连接池最大容量
+     * @param lifecyclePolicy  生命周期策略
+     */
+    public PlaywrightBrowserManager(PlaywrightConfig playwrightConfig,
+                                    int capacity,
+                                    PoolLifecyclePolicy lifecyclePolicy) {
+        this(null, playwrightConfig, capacity, lifecyclePolicy);
     }
 
     /**
@@ -92,31 +122,43 @@ public class PlaywrightBrowserManager implements AutoCloseable {
     public PlaywrightBrowserManager(GenericObjectPoolConfig<Browser> poolConfig, 
                                    PlaywrightConfig playwrightConfig, 
                                    int capacity) {
+        this(poolConfig, playwrightConfig, capacity, PoolLifecyclePolicy.forBrowserPool());
+    }
+
+    /**
+     * 创建Playwright浏览器管理器
+     *
+     * @param poolConfig       连接池配置，为null时使用默认配置
+     * @param playwrightConfig Playwright配置
+     * @param capacity         连接池最大容量
+     * @param lifecyclePolicy  生命周期策略
+     */
+    public PlaywrightBrowserManager(GenericObjectPoolConfig<Browser> poolConfig, 
+                                   PlaywrightConfig playwrightConfig, 
+                                   int capacity,
+                                   PoolLifecyclePolicy lifecyclePolicy) {
         if (playwrightConfig == null) {
             playwrightConfig = new PlaywrightConfig();
         }
         this.playwrightConfig = playwrightConfig;
+        this.lifecyclePolicy = lifecyclePolicy != null ? lifecyclePolicy : PoolLifecyclePolicy.forBrowserPool();
 
-        // 设置默认连接池配置
         if (poolConfig == null) {
             poolConfig = new GenericObjectPoolConfig<>();
-            // 启用借用时测试，确保Browser实例可用
             poolConfig.setTestOnBorrow(true);
             poolConfig.setTestOnReturn(false);
-            // 设置连接池大小
             poolConfig.setMaxTotal(capacity);
             poolConfig.setMaxIdle(capacity);
             poolConfig.setMinIdle(1);
-            // 设置空闲对象检查和清理 - 缩短间隔避免资源长期占用
-            poolConfig.setTimeBetweenEvictionRuns(Duration.ofMinutes(5)); // 从30分钟缩短到5分钟
-            poolConfig.setMinEvictableIdleDuration(Duration.ofMinutes(10)); // 从1小时缩短到10分钟
+            poolConfig.setTimeBetweenEvictionRuns(Duration.ofMinutes(5));
+            poolConfig.setMinEvictableIdleDuration(Duration.ofMinutes(10));
             poolConfig.setTestWhileIdle(true);
-            // 设置等待策略
             poolConfig.setBlockWhenExhausted(true);
             poolConfig.setMaxWait(Duration.ofSeconds(30));
         }
 
-        this.pool = new GenericObjectPool<>(new PlaywrightBrowserFactory(playwrightConfig), poolConfig);
+        this.browserFactory = new PlaywrightBrowserFactory(playwrightConfig, this.lifecyclePolicy);
+        this.pool = new GenericObjectPool<>(browserFactory, poolConfig);
         log.info("PlaywrightBrowserManager initialized with pool capacity: {}, config: {}", 
                 capacity, playwrightConfig);
     }
@@ -142,22 +184,51 @@ public class PlaywrightBrowserManager implements AutoCloseable {
         Browser browser = null;
         try {
             browser = pool.borrowObject();
+            activeBrowsers.add(browser);
             log.debug("Browser borrowed from pool. Pool status: {}", getPoolStatus());
-            
+
             PlaywrightManager.executeWithBrowser(playwrightConfig, browserContextConsumer, pageConsumer, browser);
-            
+
         } catch (Exception e) {
             log.error("Failed to execute browser operation", e);
             throw new RuntimeException("Browser operation failed", e);
         } finally {
             if (browser != null) {
-                try {
-                    pool.returnObject(browser);
-                    log.debug("Browser returned to pool. Pool status: {}", getPoolStatus());
-                } catch (Exception e) {
-                    log.warn("Failed to return browser object to pool", e);
-                }
+                activeBrowsers.remove(browser);
+                returnOrRetireBrowser(browser);
             }
+        }
+    }
+
+    private void returnOrRetireBrowser(Browser browser) {
+        try {
+            if (pendingRetirement.remove(browser)) {
+                invalidateBrowser(browser, RetireReason.MANUAL);
+                log.info("Browser manually retired on return");
+                return;
+            }
+
+            RetireDecision decision = browserFactory.evaluateOnReturn(browser);
+            if (decision.shouldRetire()) {
+                invalidateBrowser(browser, decision.reason());
+                log.info("Browser retired after task: reason={}, detail={}",
+                        decision.reason(), decision.detail());
+            } else {
+                pool.returnObject(browser);
+                log.debug("Browser returned to pool. Pool status: {}", getPoolStatus());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to return browser object, attempting invalidate", e);
+            invalidateBrowser(browser, RetireReason.VALIDATION_FAILED);
+        }
+    }
+
+    private void invalidateBrowser(Browser browser, RetireReason reason) {
+        try {
+            pool.invalidateObject(browser);
+            browserFactory.recordRetired(reason);
+        } catch (Exception invalidateEx) {
+            log.error("Failed to invalidate browser object after retire decision: reason={}", reason, invalidateEx);
         }
     }
 
@@ -182,9 +253,17 @@ public class PlaywrightBrowserManager implements AutoCloseable {
         return String.format(
                 "Browser Pool Statistics - " +
                 "Created: %d, Borrowed: %d, Returned: %d, Destroyed: %d, " +
-                "Active: %d, Idle: %d, Waiters: %d",
+                "Active: %d, Idle: %d, Waiters: %d, %s",
                 pool.getCreatedCount(), pool.getBorrowedCount(), pool.getReturnedCount(),
-                pool.getDestroyedCount(), pool.getNumActive(), pool.getNumIdle(), pool.getNumWaiters());
+                pool.getDestroyedCount(), pool.getNumActive(), pool.getNumIdle(), pool.getNumWaiters(),
+                getLifecycleMetrics());
+    }
+
+    /**
+     * 获取生命周期指标。
+     */
+    public PoolLifecycleMetrics getLifecycleMetrics() {
+        return browserFactory.getLifecycleMetrics();
     }
 
     /**
@@ -198,6 +277,37 @@ public class PlaywrightBrowserManager implements AutoCloseable {
             log.info("Evicted idle browsers from pool");
         } catch (Exception e) {
             log.warn("Failed to evict idle browsers", e);
+        }
+    }
+
+    /**
+     * 主动触发空闲实例驱逐（依赖池配置的 {@code timeBetweenEvictionRuns} 与 {@code testWhileIdle}，
+     * 在 validate 阶段按生命周期策略淘汰超龄实例）。
+     */
+    public void retireIdleBrowsers() {
+        evictIdleBrowsers();
+    }
+
+    /**
+     * 手动淘汰指定 Browser。
+     *
+     * <p>若实例正被 {@link #execute(Consumer)} 借用，则标记为待淘汰并在归还后作废；
+     * 若实例处于 idle 状态且属于本池，则立即作废。</p>
+     */
+    public void retireBrowser(Browser browser) {
+        if (browser == null) {
+            return;
+        }
+        if (activeBrowsers.contains(browser)) {
+            pendingRetirement.add(browser);
+            log.info("Browser is active; marked for manual retirement on return");
+            return;
+        }
+        try {
+            invalidateBrowser(browser, RetireReason.MANUAL);
+            log.info("Browser manually retired");
+        } catch (Exception e) {
+            log.warn("Failed to retire idle browser (it may not belong to this pool): {}", e.getMessage());
         }
     }
 

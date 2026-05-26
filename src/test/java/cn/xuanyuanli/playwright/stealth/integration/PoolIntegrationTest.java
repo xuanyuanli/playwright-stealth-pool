@@ -1,7 +1,11 @@
 package cn.xuanyuanli.playwright.stealth.integration;
 
 import cn.xuanyuanli.playwright.stealth.config.PlaywrightConfig;
+import cn.xuanyuanli.playwright.stealth.config.PoolLifecyclePolicy;
 import cn.xuanyuanli.playwright.stealth.config.StealthMode;
+import cn.xuanyuanli.playwright.stealth.manager.PlaywrightBrowserManager;
+import cn.xuanyuanli.playwright.stealth.manager.PlaywrightManager;
+import cn.xuanyuanli.playwright.stealth.pool.RetireReason;
 import cn.xuanyuanli.playwright.stealth.pool.PlaywrightBrowserFactory;
 import cn.xuanyuanli.playwright.stealth.pool.PlaywrightFactory;
 import com.microsoft.playwright.Browser;
@@ -10,9 +14,10 @@ import org.apache.commons.pool2.PooledObject;
 import org.apache.commons.pool2.impl.GenericObjectPool;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -464,6 +469,54 @@ class PoolIntegrationTest {
                 
             } catch (Exception e) {
                 fail("Performance test failed", e);
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("生命周期滚动重建集成测试")
+    class PoolLifecycleIntegrationTests {
+
+        @Test
+        @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
+        @DisplayName("Browser 池应在达到 maxBorrowCount 后滚动重建")
+        void shouldRetireBrowserAfterMaxBorrowCount() {
+            PlaywrightConfig playwrightConfig = new PlaywrightConfig()
+                    .setHeadless(true)
+                    .setStealthMode(StealthMode.LIGHT);
+            PoolLifecyclePolicy policy = new PoolLifecyclePolicy()
+                    .setMaxBorrowCount(3)
+                    .setMaxLifetime(null)
+                    .setResourcePressureEnabled(false);
+
+            try (PlaywrightBrowserManager manager = new PlaywrightBrowserManager(playwrightConfig, 1, policy)) {
+                for (int i = 0; i < 5; i++) {
+                    manager.execute(page -> page.navigate("about:blank"));
+                }
+
+                assertThat(manager.getLifecycleMetrics()
+                        .getRetiredByReason().get(RetireReason.MAX_BORROW_COUNT)).isGreaterThanOrEqualTo(1L);
+            }
+        }
+
+        @Test
+        @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
+        @DisplayName("Playwright 池应在达到 maxBorrowCount 后滚动重建")
+        void shouldRetirePlaywrightAfterMaxBorrowCount() {
+            PlaywrightConfig playwrightConfig = new PlaywrightConfig()
+                    .setHeadless(true)
+                    .setStealthMode(StealthMode.LIGHT);
+            PoolLifecyclePolicy policy = PoolLifecyclePolicy.forPlaywrightPool()
+                    .setMaxBorrowCount(3)
+                    .setMaxLifetime(null);
+
+            try (PlaywrightManager manager = new PlaywrightManager(1, 1, policy)) {
+                for (int i = 0; i < 5; i++) {
+                    manager.execute(playwrightConfig, page -> page.navigate("about:blank"));
+                }
+
+                assertThat(manager.getLifecycleMetrics()
+                        .getRetiredByReason().get(RetireReason.MAX_BORROW_COUNT)).isGreaterThanOrEqualTo(1L);
             }
         }
     }

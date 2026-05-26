@@ -2,15 +2,23 @@ package cn.xuanyuanli.playwright.stealth.manager;
 
 import cn.xuanyuanli.core.util.Images;
 import cn.xuanyuanli.playwright.stealth.config.PlaywrightConfig;
+import cn.xuanyuanli.playwright.stealth.config.PoolLifecyclePolicy;
 import cn.xuanyuanli.playwright.stealth.config.StealthMode;
+import cn.xuanyuanli.playwright.stealth.pool.RetireReason;
 import cn.xuanyuanli.playwright.stealth.TestConditions;
+import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.Response;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * PlaywrightBrowserManager测试类
@@ -146,5 +154,42 @@ class PlaywrightBrowserManagerTest {
         
         // 输出统计信息
         System.out.println("详细统计: " + browserManager.getPoolStatistics());
+    }
+
+    /**
+     * 借用中的 Browser 调用 retireBrowser 应延迟到归还后作废。
+     */
+    @Test
+    @EnabledIf("cn.xuanyuanli.playwright.stealth.TestConditions#isIntegrationTestsEnabled")
+    void shouldDeferManualRetirementWhileBrowserIsActive() throws Exception {
+        PoolLifecyclePolicy policy = new PoolLifecyclePolicy()
+                .setMaxBorrowCount(10_000)
+                .setMaxLifetime(null)
+                .setResourcePressureEnabled(false);
+        try (PlaywrightBrowserManager manager = new PlaywrightBrowserManager(config, 1, policy)) {
+            CountDownLatch taskStarted = new CountDownLatch(1);
+            CountDownLatch releaseTask = new CountDownLatch(1);
+            AtomicReference<Browser> browserRef = new AtomicReference<>();
+
+            Thread worker = Thread.ofVirtual().start(() -> manager.execute(page -> {
+                browserRef.set(page.context().browser());
+                taskStarted.countDown();
+                try {
+                    assertThat(releaseTask.await(30, TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(e);
+                }
+                page.navigate("about:blank");
+            }));
+
+            assertThat(taskStarted.await(30, TimeUnit.SECONDS)).isTrue();
+            manager.retireBrowser(browserRef.get());
+            releaseTask.countDown();
+            worker.join(60_000);
+
+            assertThat(manager.getLifecycleMetrics()
+                    .getRetiredByReason().get(RetireReason.MANUAL)).isGreaterThanOrEqualTo(1L);
+        }
     }
 }

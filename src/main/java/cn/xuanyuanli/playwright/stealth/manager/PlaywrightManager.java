@@ -1,7 +1,14 @@
 package cn.xuanyuanli.playwright.stealth.manager;
 
 import cn.xuanyuanli.playwright.stealth.config.PlaywrightConfig;
+import cn.xuanyuanli.playwright.stealth.config.PoolLifecyclePolicy;
+import cn.xuanyuanli.playwright.stealth.monitor.ChromiumProcessRegistry;
+import cn.xuanyuanli.playwright.stealth.monitor.ChromiumResourceMonitor;
+import cn.xuanyuanli.playwright.stealth.monitor.ChromiumResourceMonitors;
+import cn.xuanyuanli.playwright.stealth.monitor.ChromiumResourceSnapshot;
 import cn.xuanyuanli.playwright.stealth.pool.PlaywrightFactory;
+import cn.xuanyuanli.playwright.stealth.pool.RetireDecision;
+import cn.xuanyuanli.playwright.stealth.pool.RetireReason;
 import cn.xuanyuanli.playwright.stealth.stealth.StealthScriptProvider;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
@@ -16,6 +23,7 @@ import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.function.Consumer;
 
@@ -26,6 +34,8 @@ import java.util.function.Consumer;
  * <ul>
  *   <li>维护Playwright实例连接池，提高资源复用率</li>
  *   <li>提供统一的页面执行接口</li>
+ *   <li>支持按次数、存活时长滚动重建 Playwright 实例</li>
+ *   <li>空闲驱逐由 Commons Pool2 内置 evictor 驱动（见 {@code timeBetweenEvictionRuns}）</li>
  *   <li>集成反检测脚本注入功能</li>
  *   <li>管理浏览器启动参数和配置</li>
  * </ul>
@@ -63,6 +73,15 @@ public class PlaywrightManager implements AutoCloseable {
      */
     private final GenericObjectPool<Playwright> pool;
 
+    private final PlaywrightFactory playwrightFactory;
+
+    private final PoolLifecyclePolicy lifecyclePolicy;
+
+    private final ThreadLocal<Boolean> forceRetireCurrentPlaywright = ThreadLocal.withInitial(() -> false);
+
+    /** 临时 Browser 的资源监控（每次 execute 创建 transient browser 时使用） */
+    private final ChromiumProcessRegistry transientBrowserProcessRegistry = new ChromiumProcessRegistry();
+
     /**
      * Browser创建并发控制信号量
      */
@@ -89,7 +108,7 @@ public class PlaywrightManager implements AutoCloseable {
      * @param capacity 连接池最大容量
      */
     public PlaywrightManager(int capacity) {
-        this(null, capacity, getDefaultConcurrency());
+        this(null, capacity, getDefaultConcurrency(), PoolLifecyclePolicy.forPlaywrightPool());
     }
 
     /**
@@ -99,7 +118,18 @@ public class PlaywrightManager implements AutoCloseable {
      * @param maxConcurrency 最大Browser创建并发数（建议不超过系统资源限制）
      */
     public PlaywrightManager(int capacity, int maxConcurrency) {
-        this(null, capacity, maxConcurrency);
+        this(null, capacity, maxConcurrency, PoolLifecyclePolicy.forPlaywrightPool());
+    }
+
+    /**
+     * 创建Playwright管理器
+     *
+     * @param capacity         连接池最大容量
+     * @param maxConcurrency   最大Browser创建并发数
+     * @param lifecyclePolicy  生命周期策略
+     */
+    public PlaywrightManager(int capacity, int maxConcurrency, PoolLifecyclePolicy lifecyclePolicy) {
+        this(null, capacity, maxConcurrency, lifecyclePolicy);
     }
 
     /**
@@ -110,6 +140,22 @@ public class PlaywrightManager implements AutoCloseable {
      * @param maxConcurrency 最大Browser创建并发数
      */
     public PlaywrightManager(GenericObjectPoolConfig<Playwright> poolConfig, int capacity, int maxConcurrency) {
+        this(poolConfig, capacity, maxConcurrency, PoolLifecyclePolicy.forPlaywrightPool());
+    }
+
+    /**
+     * 创建Playwright管理器
+     *
+     * @param poolConfig       连接池配置，为null时使用默认配置
+     * @param capacity         连接池最大容量
+     * @param maxConcurrency   最大Browser创建并发数
+     * @param lifecyclePolicy  生命周期策略
+     */
+    public PlaywrightManager(GenericObjectPoolConfig<Playwright> poolConfig,
+                             int capacity,
+                             int maxConcurrency,
+                             PoolLifecyclePolicy lifecyclePolicy) {
+        this.lifecyclePolicy = lifecyclePolicy != null ? lifecyclePolicy : PoolLifecyclePolicy.forPlaywrightPool();
         if (poolConfig == null) {
             poolConfig = new GenericObjectPoolConfig<>();
             poolConfig.setMaxTotal(capacity);
@@ -117,13 +163,18 @@ public class PlaywrightManager implements AutoCloseable {
             poolConfig.setMaxIdle(capacity);
             poolConfig.setTestOnBorrow(true);
             poolConfig.setTestOnReturn(false);
+            poolConfig.setTimeBetweenEvictionRuns(Duration.ofMinutes(5));
+            poolConfig.setMinEvictableIdleDuration(Duration.ofMinutes(10));
+            poolConfig.setTestWhileIdle(true);
             poolConfig.setBlockWhenExhausted(true);
             poolConfig.setMaxWait(Duration.ofMillis(DEFAULT_MAX_WAIT_MILLIS));
         }
 
-        this.pool = new GenericObjectPool<>(new PlaywrightFactory(), poolConfig);
+        this.playwrightFactory = new PlaywrightFactory(this.lifecyclePolicy);
+        this.pool = new GenericObjectPool<>(playwrightFactory, poolConfig);
         this.browserCreationSemaphore = new Semaphore(maxConcurrency);
-        log.info("PlaywrightManager initialized with pool capacity: {}, max browser concurrency: {}", capacity, maxConcurrency);
+        log.info("PlaywrightManager initialized with pool capacity: {}, max browser concurrency: {}",
+                capacity, maxConcurrency);
     }
 
     /**
@@ -210,12 +261,8 @@ public class PlaywrightManager implements AutoCloseable {
 
                     // 归还连接池对象
                     if (playwright != null) {
-                        try {
-                            pool.returnObject(playwright);
-                            playwright = null;
-                        } catch (Exception returnEx) {
-                            log.warn("Failed to return playwright object to pool during retry: {}", returnEx.getMessage());
-                        }
+                        returnOrRetirePlaywright(playwright);
+                        playwright = null;
                     }
 
                     // 等待后重试
@@ -238,14 +285,90 @@ public class PlaywrightManager implements AutoCloseable {
 
             } finally {
                 if (playwright != null) {
-                    try {
-                        pool.returnObject(playwright);
-                    } catch (Exception returnEx) {
-                        log.warn("Failed to return playwright object to pool: {}", returnEx.getMessage());
-                    }
+                    returnOrRetirePlaywright(playwright);
                 }
+                forceRetireCurrentPlaywright.remove();
             }
         }
+    }
+
+    private void returnOrRetirePlaywright(Playwright playwright) {
+        try {
+            RetireDecision decision = playwrightFactory.evaluateOnReturn(playwright);
+            if (Boolean.TRUE.equals(forceRetireCurrentPlaywright.get())) {
+                decision = RetireDecision.retire(
+                        RetireReason.RESOURCE_PRESSURE,
+                        "transient browser exceeded resource thresholds during task");
+            }
+            if (decision.shouldRetire()) {
+                invalidatePlaywright(playwright, decision.reason());
+                log.info("Playwright retired after task: reason={}, detail={}",
+                        decision.reason(), decision.detail());
+            } else {
+                pool.returnObject(playwright);
+            }
+        } catch (Exception returnEx) {
+            log.warn("Failed to return playwright object, attempting invalidate: {}", returnEx.getMessage());
+            invalidatePlaywright(playwright, RetireReason.VALIDATION_FAILED);
+        }
+    }
+
+    private void invalidatePlaywright(Playwright playwright, RetireReason reason) {
+        try {
+            pool.invalidateObject(playwright);
+            playwrightFactory.recordRetired(reason);
+        } catch (Exception invalidateEx) {
+            log.error("Failed to invalidate playwright object after retire decision: reason={}", reason, invalidateEx);
+        }
+    }
+
+    /**
+     * 获取连接池状态信息
+     */
+    public String getPoolStatus() {
+        return String.format("Playwright Pool Status - Active: %d, Idle: %d, Total: %d/%d, Waiters: %d",
+                pool.getNumActive(), pool.getNumIdle(),
+                pool.getNumActive() + pool.getNumIdle(), pool.getMaxTotal(),
+                pool.getNumWaiters());
+    }
+
+    /**
+     * 获取详细的连接池统计信息
+     */
+    public String getPoolStatistics() {
+        return String.format(
+                "Playwright Pool Statistics - Created: %d, Borrowed: %d, Returned: %d, Destroyed: %d, "
+                        + "Active: %d, Idle: %d, Waiters: %d, %s",
+                pool.getCreatedCount(), pool.getBorrowedCount(), pool.getReturnedCount(),
+                pool.getDestroyedCount(), pool.getNumActive(), pool.getNumIdle(), pool.getNumWaiters(),
+                getLifecycleMetrics());
+    }
+
+    /**
+     * 获取生命周期指标。
+     */
+    public PoolLifecycleMetrics getLifecycleMetrics() {
+        return playwrightFactory.getLifecycleMetrics();
+    }
+
+    /**
+     * 清理空闲 Playwright 实例。
+     */
+    public void evictIdlePlaywrights() {
+        try {
+            pool.evict();
+            log.info("Evicted idle playwright instances from pool");
+        } catch (Exception e) {
+            log.warn("Failed to evict idle playwright instances", e);
+        }
+    }
+
+    /**
+     * 主动触发空闲实例驱逐（依赖池配置的 {@code timeBetweenEvictionRuns} 与 {@code testWhileIdle}，
+     * 在 validate 阶段按生命周期策略淘汰超龄实例）。
+     */
+    public void retireIdlePlaywrights() {
+        evictIdlePlaywrights();
     }
 
     /**
@@ -498,6 +621,8 @@ public class PlaywrightManager implements AutoCloseable {
         if (config == null) {
             config = new PlaywrightConfig();
         }
+        final PlaywrightConfig launchConfig = config;
+        final Playwright launchPlaywright = playwright;
 
         // 使用信号量控制 Browser 创建并发
         long acquireStart = System.currentTimeMillis();
@@ -512,16 +637,56 @@ public class PlaywrightManager implements AutoCloseable {
             throw new RuntimeException("Interrupted while waiting for browser creation permit", e);
         }
 
-        try (Browser browser = createBrowser(config, playwright)) {
-            executeWithBrowser(config, browserContextConsumer, pageConsumer, browser);
+        Set<Long> processBaseline = Set.of();
+        Browser browser;
+        if (lifecyclePolicy.isResourcePressureEnabled()) {
+            TransientBrowserLaunch launch = ChromiumProcessRegistry.runWithLaunchIsolation(
+                    baseline -> new TransientBrowserLaunch(createBrowser(launchConfig, launchPlaywright), baseline));
+            browser = launch.browser();
+            processBaseline = launch.baseline();
+        } else {
+            browser = createBrowser(launchConfig, launchPlaywright);
+        }
+        try {
+            executeWithBrowser(launchConfig, browserContextConsumer, pageConsumer, browser);
+            if (shouldRetireForResourcePressure(browser, processBaseline)) {
+                forceRetireCurrentPlaywright.set(true);
+            }
         } finally {
+            closeResourceSafely(browser, "browser");
             browserCreationSemaphore.release();
+        }
+    }
+
+    private record TransientBrowserLaunch(Browser browser, Set<Long> baseline) {
+    }
+
+    private boolean shouldRetireForResourcePressure(Browser browser, Set<Long> processBaseline) {
+        if (!lifecyclePolicy.isResourcePressureEnabled() || browser == null) {
+            return false;
+        }
+
+        ChromiumResourceMonitor monitor = ChromiumResourceMonitors.create(
+                lifecyclePolicy, transientBrowserProcessRegistry);
+        monitor.registerBrowser(browser, processBaseline);
+        try {
+            ChromiumResourceSnapshot snapshot = monitor.snapshot(browser);
+            playwrightFactory.getLifecycleMetrics().updateLastResourceSnapshot(snapshot);
+            if (lifecyclePolicy.getMaxChromiumRssBytes() > 0
+                    && snapshot.totalRssBytes() > lifecyclePolicy.getMaxChromiumRssBytes()) {
+                return true;
+            }
+            return lifecyclePolicy.getMaxChromiumFdCount() > 0
+                    && snapshot.maxFdCount() > lifecyclePolicy.getMaxChromiumFdCount();
+        } finally {
+            monitor.unregisterBrowser(browser);
         }
     }
 
     @Override
     public void close() {
         try {
+            log.info("Closing PlaywrightManager. Final statistics: {}", getPoolStatistics());
             pool.close();
             log.info("PlaywrightManager closed successfully");
         } catch (Exception e) {

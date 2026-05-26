@@ -25,13 +25,18 @@ cn.xuanyuanli.playwright.stealth/
 │   └── HumanBehaviorSimulator.java
 ├── config/                  # 配置管理
 │   ├── PlaywrightConfig.java
+│   ├── PoolLifecyclePolicy.java
 │   └── StealthMode.java
 ├── manager/                 # 管理器
 │   ├── PlaywrightManager.java
-│   └── PlaywrightBrowserManager.java  
+│   ├── PlaywrightBrowserManager.java
+│   └── PoolLifecycleMetrics.java
+├── monitor/                 # Chromium 资源监控
+│   └── ChromiumResourceMonitor.java
 ├── pool/                    # 连接池工厂
 │   ├── PlaywrightFactory.java
-│   └── PlaywrightBrowserFactory.java
+│   ├── PlaywrightBrowserFactory.java
+│   └── PoolLifecycleEvaluator.java
 └── stealth/                 # 反检测功能
     └── StealthScriptProvider.java
 ```
@@ -325,11 +330,59 @@ manager.execute(config, page -> {
 ```java
 // 获取连接池状态
 System.out.println(manager.getPoolStatus());
-// 输出: Pool Status - Active: 2, Idle: 3, Total: 5/8
+// 输出: Playwright Pool Status - Active: 2, Idle: 3, Total: 5/8
 
-// 获取详细统计（仅BrowserManager支持）
+// 获取详细统计
+System.out.println(manager.getPoolStatistics());
 System.out.println(browserManager.getPoolStatistics());
-// 输出: Browser Pool Statistics - Created: 10, Borrowed: 25, Returned: 23...
+// 输出包含生命周期指标: Retired[maxBorrow=12, maxLifetime=3, resourcePressure=1, validationFailed=2]
+```
+
+### 池生命周期 / 定期重建
+
+长期运行的 Browser 池会累积页面缓存、renderer 进程、临时文件和 FD。库支持**单实例滚动重建**（不会整池同时下线）。
+
+**Browser 池默认策略**（`PoolLifecyclePolicy.forBrowserPool()`）：任务 500 次或存活 1 小时重建；资源压力默认开启，但 **RSS 不限制**（`maxChromiumRssBytes=0`），在 **Linux** 上主要按 **FD 上限 800** 淘汰。若需按内存重建，请显式设置 `maxChromiumRssBytes`。**Browser 池与 Playwright 池**的空闲实例清理由 Commons Pool2 内置 evictor 负责（`timeBetweenEvictionRuns`，默认 5 分钟），无需额外调度线程。
+
+```java
+// 使用默认 Browser 池策略
+PlaywrightBrowserManager browserManager =
+    new PlaywrightBrowserManager(config, 5);
+
+// 或自定义（生产建议显式设置 RSS）
+PoolLifecyclePolicy policy = new PoolLifecyclePolicy()
+    .setMaxBorrowCount(500)
+    .setMaxLifetime(Duration.ofHours(1))
+    .setResourcePressureEnabled(true)
+    .setMaxChromiumRssBytes(1_200_000_000L)  // 默认 0，不按 RSS 淘汰
+    .setMaxChromiumFdCount(800);
+
+browserManager = new PlaywrightBrowserManager(config, 5, policy);
+
+PlaywrightManager manager =
+    new PlaywrightManager(8, 4, PoolLifecyclePolicy.forPlaywrightPool());
+```
+
+| 场景 | maxBorrowCount | maxLifetime | maxChromiumRss | maxChromiumFd |
+|------|----------------|-------------|----------------|---------------|
+| 高频短页（爬虫） | 200 | 30m | 容器内存 60% | 512 |
+| 中频服务 | 500 | 1h | 容器内存 70% | 800 |
+| 低频长会话 | 1000 | 2h | 关闭或放宽 | 1024 |
+
+**运维建议**：
+
+- 重建间隔应小于 K8s `livenessProbe` 失败时间
+- 生产环境建议在 Linux 容器部署，以启用 `/proc` 级 RSS/FD 监控
+- 高并发时 `capacity` 略大于峰值并发，吸收滚动重建抖动
+- 重建会丢失 Browser 内 Cookie/会话，需由业务侧自行持久化
+
+```java
+// 查看生命周期指标
+System.out.println(browserManager.getLifecycleMetrics());
+
+// 低峰期主动触发空闲驱逐（配合 testWhileIdle + 生命周期 validate）
+browserManager.retireIdleBrowsers();
+manager.retireIdlePlaywrights();
 ```
 
 ### 预热和清理

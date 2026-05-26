@@ -1,7 +1,9 @@
 package cn.xuanyuanli.playwright.stealth.pool;
 
 import cn.xuanyuanli.playwright.stealth.config.PlaywrightConfig;
+import cn.xuanyuanli.playwright.stealth.config.PoolLifecyclePolicy;
 import cn.xuanyuanli.playwright.stealth.config.StealthMode;
+import cn.xuanyuanli.playwright.stealth.pool.RetireReason;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.Playwright;
@@ -306,6 +308,34 @@ class PlaywrightBrowserFactoryTest {
                 if (browser != null) {
                     PooledObject<Browser> pooled = factory.wrap(browser);
                     factory.destroyObject(pooled);
+                }
+            }
+        }
+
+        @Test
+        @DisplayName("超过最大任务次数后应验证失败")
+        void shouldFailValidationWhenMaxBorrowCountExceeded() {
+            PoolLifecyclePolicy policy = new PoolLifecyclePolicy()
+                    .setMaxBorrowCount(2)
+                    .setMaxLifetime(null)
+                    .setResourcePressureEnabled(false);
+            PlaywrightBrowserFactory lifecycleFactory = new PlaywrightBrowserFactory(
+                    new PlaywrightConfig().setHeadless(true), policy);
+
+            Browser browser = null;
+            try {
+                browser = lifecycleFactory.create();
+                PooledObject<Browser> pooledObject = lifecycleFactory.wrap(browser);
+
+                lifecycleFactory.evaluateOnReturn(browser);
+                lifecycleFactory.evaluateOnReturn(browser);
+
+                assertThat(lifecycleFactory.validateObject(pooledObject)).isFalse();
+                assertThat(lifecycleFactory.getLifecycleMetrics()
+                        .getRetiredByReason().get(RetireReason.MAX_BORROW_COUNT)).isGreaterThanOrEqualTo(1L);
+            } finally {
+                if (browser != null) {
+                    lifecycleFactory.destroyObject(lifecycleFactory.wrap(browser));
                 }
             }
         }

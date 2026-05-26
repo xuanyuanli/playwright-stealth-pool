@@ -1,6 +1,10 @@
 package cn.xuanyuanli.playwright.stealth.pool;
 
+import cn.xuanyuanli.playwright.stealth.config.PoolLifecyclePolicy;
+import cn.xuanyuanli.playwright.stealth.manager.PoolLifecycleMetrics;
+import cn.xuanyuanli.playwright.stealth.monitor.ChromiumResourceMonitors;
 import com.microsoft.playwright.Playwright;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.pool2.BasePooledObjectFactory;
 import org.apache.commons.pool2.PooledObject;
 import org.apache.commons.pool2.impl.DefaultPooledObject;
@@ -13,6 +17,7 @@ import org.apache.commons.pool2.impl.DefaultPooledObject;
  *   <li>创建新的Playwright实例</li>
  *   <li>包装实例为连接池对象</li>
  *   <li>销毁不再使用的实例，释放资源</li>
+ *   <li>按生命周期策略滚动重建Playwright实例</li>
  * </ul>
  * 
  * <p>Playwright实例是重量级对象，创建成本较高，通过连接池可以有效复用实例，
@@ -20,8 +25,57 @@ import org.apache.commons.pool2.impl.DefaultPooledObject;
  *
  * @author xuanyuanli
  */
+@Slf4j
 public class PlaywrightFactory extends BasePooledObjectFactory<Playwright> {
 
+    private final PoolLifecyclePolicy lifecyclePolicy;
+    private final PooledObjectLifecycleRegistry lifecycleRegistry = new PooledObjectLifecycleRegistry();
+    private final PoolLifecycleMetrics lifecycleMetrics = new PoolLifecycleMetrics();
+    private final PoolLifecycleEvaluator lifecycleEvaluator;
+
+    public PlaywrightFactory() {
+        this(PoolLifecyclePolicy.forPlaywrightPool());
+    }
+
+    public PlaywrightFactory(PoolLifecyclePolicy lifecyclePolicy) {
+        this.lifecyclePolicy = lifecyclePolicy != null ? lifecyclePolicy : PoolLifecyclePolicy.forPlaywrightPool();
+        ChromiumResourceMonitors.warnIfResourcePressureUnsupported(this.lifecyclePolicy);
+        this.lifecycleEvaluator = new PoolLifecycleEvaluator(
+                this.lifecyclePolicy,
+                ChromiumResourceMonitors.create(this.lifecyclePolicy),
+                lifecycleMetrics);
+    }
+
+    public PoolLifecycleMetrics getLifecycleMetrics() {
+        return lifecycleMetrics;
+    }
+
+    public PoolLifecyclePolicy getLifecyclePolicy() {
+        return lifecyclePolicy;
+    }
+
+    public RetireDecision evaluateOnReturn(Playwright playwright) {
+        if (playwright == null) {
+            return RetireDecision.keep();
+        }
+        recordTaskCompleted(playwright);
+        return lifecycleEvaluator.evaluate(lifecycleRegistry.get(playwright));
+    }
+
+    public void recordRetired(RetireReason reason) {
+        lifecycleMetrics.recordRetired(reason);
+    }
+
+    public void recordValidationFailed() {
+        lifecycleMetrics.recordRetired(RetireReason.VALIDATION_FAILED);
+    }
+
+    private void recordTaskCompleted(Playwright playwright) {
+        PooledObjectLifecycle lifecycle = lifecycleRegistry.get(playwright);
+        if (lifecycle != null) {
+            lifecycle.incrementTaskCount();
+        }
+    }
 
     /**
      * 创建新的Playwright实例
@@ -35,7 +89,9 @@ public class PlaywrightFactory extends BasePooledObjectFactory<Playwright> {
      */
     @Override
     public Playwright create() {
-        return Playwright.create();
+        Playwright playwright = Playwright.create();
+        lifecycleRegistry.register(playwright);
+        return playwright;
     }
 
     /**
@@ -52,6 +108,31 @@ public class PlaywrightFactory extends BasePooledObjectFactory<Playwright> {
         return new DefaultPooledObject<>(playwright);
     }
 
+    @Override
+    public boolean validateObject(PooledObject<Playwright> pooledPlaywright) {
+        if (pooledPlaywright == null || pooledPlaywright.getObject() == null) {
+            recordValidationFailed();
+            return false;
+        }
+
+        Playwright playwright = pooledPlaywright.getObject();
+        try {
+            playwright.chromium();
+        } catch (Exception e) {
+            log.warn("Playwright validation failed: {}", e.getMessage());
+            recordValidationFailed();
+            return false;
+        }
+
+        RetireDecision decision = lifecycleEvaluator.evaluate(lifecycleRegistry.get(playwright));
+        if (decision.shouldRetire()) {
+            log.info("Playwright failed lifecycle validation on borrow: {}", decision.detail());
+            recordRetired(decision.reason());
+            return false;
+        }
+        return true;
+    }
+
     /**
      * 销毁Playwright实例，释放相关资源
      * 
@@ -62,10 +143,15 @@ public class PlaywrightFactory extends BasePooledObjectFactory<Playwright> {
      */
     @Override
     public void destroyObject(PooledObject<Playwright> pooledPlaywright) {
+        if (pooledPlaywright == null || pooledPlaywright.getObject() == null) {
+            return;
+        }
+        Playwright playwright = pooledPlaywright.getObject();
+        lifecycleRegistry.unregister(playwright);
         try {
-            pooledPlaywright.getObject().close();
+            playwright.close();
         } catch (Exception e) {
-            // 忽略关闭时的异常，确保销毁流程继续
+            log.debug("Error closing Playwright instance: {}", e.getMessage());
         }
     }
 }
